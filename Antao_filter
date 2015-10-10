@@ -1,0 +1,121 @@
+Variant filtering code.
+
+from __future__ import division
+import os
+import pickle
+import sys
+
+import vcf
+from vcf import model
+
+vcfin = sys.argv[1]
+
+#Parameter is the VCF file
+
+dps = {}
+samples = {}
+
+
+def accept_sample(chro, smp):
+    if smp[“DP”] < 14:
+        return False
+    if smp["GQ"] < 40:
+        return False
+    median = dps[smp.sample][chro]
+    if smp["DP"] < median / 2 or smp["DP"] > median * 2:
+        return False
+    return True
+
+
+def accept_rec(rec):
+    if rec.CHROM not in ["2L", "2R", "3L", "3R", "X"]:
+        return False
+    if not rec.is_snp:
+        return False
+    if len(rec.ALT) != 1:
+        return False
+    if rec.INFO["MQ"] < 40:
+        return False
+    if rec.INFO["QD"] < 5:
+        return False
+    if rec.INFO["HRun"] > 3:
+        return False
+    return True
+
+
+def get_dp(vcfin):
+    global dps
+    pic = "filter.dp"
+    if os.path.exists(pic):
+        dps = pickle.load(open(pic))
+        return
+    f = vcf.Reader(filename=vcfin)
+    rec = f.next()
+    samples = [x.sample for x in rec.samples]
+    cnt = {}
+    cnt["2L"] = 0
+    cnt["2R"] = 0
+    cnt["3L"] = 0
+    cnt["3R"] = 0
+    cnt["X"] = 0
+    for sample in samples:
+        dps[sample] = {}
+        dps[sample]["2L"] = {}
+        dps[sample]["2R"] = {}
+        dps[sample]["3L"] = {}
+        dps[sample]["3R"] = {}
+        dps[sample]["X"] = {}
+    f = vcf.Reader(filename=vcfin)
+    c = 0
+    for rec in f:
+        if not accept_rec(rec):
+            continue
+        cnt[rec.CHROM] += 1
+        for smp in rec.samples:
+            sample = smp.sample
+            dp = smp["DP"]
+            dps[sample][rec.CHROM][dp] = dps[sample][rec.CHROM].get(dp, 0) + 1
+        c += 1
+        if c % 10000 == 0:
+            print c, rec.CHROM, rec.POS
+
+    for sample in samples:
+        for chrom in ["2L", "2R", "3L", "3R", "X"]:
+            vals = []
+            my_dps = dps[sample][chrom].keys()
+            my_dps.sort()
+            for my_dp in my_dps:
+                vals.extend([my_dp] * dps[sample][chrom][my_dp])
+            if len(vals) > 0:
+                dps[sample][chrom] = vals[len(vals) // 2]
+    pickle.dump(dps, open(pic, "w"))
+
+
+def do_vcf(vcfin):
+    f = vcf.Reader(filename=vcfin)
+    w = vcf.Writer(open("out.vcf", "w"), f, lineterminator="\n")
+    cnt = 0
+    for rec in f:
+        if not accept_rec(rec):
+            continue
+        has_data = False
+        for smp in rec.samples:
+            if not accept_sample(rec.CHROM, smp):
+                empty = ['GT', 'AD', 'DP', 'GQ', 'MQ0', 'PL']
+                smp.data = model.make_calldata_tuple(empty)(None, None, None, None, None, None)
+            else:
+                has_data = True
+        if has_data:
+            w.write_record(rec)
+        cnt += 1
+        if cnt % 10000 == 0:
+            print cnt, rec.CHROM, rec.POS
+    w.close()
+
+get_dp(vcfin)
+print dps
+do_vcf(vcfin)
+
+
+
+
